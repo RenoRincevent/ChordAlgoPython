@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: Utf-8 -*-
+
 import json
 import threading
 import os
@@ -8,8 +9,8 @@ import logging
 import random
 import socket
 
-IP_NODE = "127.0.0.1"
-PORT_NODE = 10005
+IP_MASTER = "127.0.0.1"
+PORT_MASTER = 10001
 KEY_MAX = 255
 
 def send_message(ip,port,jsonFrame):
@@ -28,11 +29,18 @@ class Node(object):
     _id = None #id = (ip,port,key)
     _prev = None # id du précédent
     _next = None # id du suivant
+    _data = dict() # données de chaque node
+    IP_MASTER = None #ip du premier node dans le cercle
+    PORT_MASTER = None #port du premier node dans le cercle
+    _ip_wait = None
+    _port_wait = None
 
     #initialise le node
-    def __init__(self,ip,port):
+    def __init__(self,ip,port,IP_MASTER,PORT_MASTER):
         self._ip = ip
         self._port = port
+        self.IP_MASTER = IP_MASTER
+        self.PORT_MASTER = PORT_MASTER
 
     def get_port(self):
         return self._port
@@ -43,17 +51,22 @@ class Node(object):
         jsonFrame['type'] = 'join'
         jsonFrame['ip'] = self._ip
         jsonFrame['port'] = self._port
-        send_message(self._ip,self._port,jsonFrame)
+        send_message(self.IP_MASTER,self.PORT_MASTER,jsonFrame)
         return
 
     #sur un join m1 tire au hasard une clé et vérifie qu'elle soit disponible en envoyant un lookup de cette clé
-    def on_join(self,ip,port):
+    def join_action(self,ip,port):
         key = random.randint(0, KEY_MAX)
+        self._ip_wait = ip
+        self._port_wait = port
         self.lookup(key,self._id)
         return
 
     #envoie du frame de lookup
     def lookup(self,key,id_s):
+        if self._next == None: #Si aucun suivant pas besoin d'envoyer de message de lookup
+            self.lookup_action(key,id_s)
+            return
         jsonFrame = {}
         jsonFrame['type'] = 'lookup'
         jsonFrame['key'] = int(key)
@@ -64,13 +77,16 @@ class Node(object):
         return
 
     #Sur la réception du message lookup, vérifie si la clé est disponible ou non et envoie un ans_lookup avec OK si disponible NOK si non disponible
-    def on_lookup(self,key,id_s):
+    def lookup_action(self,key,id_s):
+        print("lookup action : id thread={} key={}, id_s={}".format(self._id,key,id_s))
         if self._key == key: #si la clé est egale a la self.key alors ans_lookup NOK
             self.ans_lookup(key, 'NOK', None, None, id_s[0], id_s[1])
-        elif key > self._key: #si la valeur de key ne fait pas partie de l'intervelle de ce node alors on lookup sur le suivant
+        elif self._prev is None: #Si il n'y a qu'un seul noeud dans le cercle et que la clé disponible
+            self.ans_lookup(int(key),'OK',self._id,self._id,id_s[0],id_s[1])
+        elif key > self._key and key < self._prev[2]: #si la valeur de key ne fait pas partie de l'intervalle de ce node alors on lookup sur le suivant
             self.lookup(key,id_s)
-        elif key < self._key and key > self._prev[2]: #si la valeur de la clé fait partie de l'intervalle de ce node et que que ce n'est pas sa clé alors ans_lookup OK
-            self.ans_lookup(int(key), 'OK', self._id, self._prev, id_s[0], id_s[1])
+        elif key < self._key or key > self._prev[2]: #si la valeur de la clé fait partie de l'intervalle de ce node et que que ce n'est pas sa clé alors ans_lookup OK
+            self.ans_lookup(int(key), 'OK', self._prev, self._id, id_s[0], id_s[1])
         return
 
     #répond au node qui a envoyer le lookup en lui disant si oui ou non la clé est disponible
@@ -84,11 +100,11 @@ class Node(object):
         send_message(ip,port,jsonFrame)
         return
 
-    def on_ans_lookup(self,key,status,mb_prec,mb_next):
+    def ans_lookup_action(self,key,status,mb_prec,mb_next):
         if(status == 'OK'): #si ok on envoie une réponse au noeud pour qu'il puisse rejoindre le cercle
             self.ans_join(int(key),mb_prec,mb_next)
         else: #si not ok on re tire aléatoirement un clé est on effectue le meme processus à partir du lookup
-            self.on_join(ip, port)
+            self.join_action(ip, port)
 
     #envoie de la réponse pour rejoinde le cercle
     def ans_join(self,key,mb_prec,mb_next):
@@ -97,45 +113,94 @@ class Node(object):
         jsonFrame['key'] = int(key)
         jsonFrame['mbprec'] = mb_prec
         jsonFrame['mbnext'] = mb_next
-        send_message(self._ip,self._port,jsonFrame)
+        send_message(self._ip_wait,self._port_wait,jsonFrame)
         return
 
-    def on_message(self, msg):
+    #reponse pour rejoindre le cercle, met ses paramètres à jours
+    def ans_join_action(self,key,mb_prec,mb_next):
+        self._prev = (str(mb_prec[0]),int(mb_prec[1]),int(mb_prec[2]))
+        self._next = (str(mb_next[0]),int(mb_next[1]),int(mb_next[2]))
+        self._id = (str(self._ip),int(self._port),int(key))
+        self.get_data()
+        self.set_next()
+        return
+
+    #demander a mbnext la partie de la table de routage qui doit desormer lui appartenir
+    def get_data(self):
+        jsonFrame = {}
+        jsonFrame['type'] = 'get_data'
+        jsonFrame['id_s'] = self._id
+        send_message(self._next[0],self._next[1],jsonFrame)
+        return
+
+    #met mbnext a jour et envoie les nouvelle donnée a n
+    def get_data_action(self,id_s):
+        self._prev = (str(id_s[0]),int(id_s[1]),int(id_s[2]))
+        key_prev = int(id_s[2])
+        data_for_prev = dict()
+        for k in self._data.keys():
+            if (k <= key_prev):
+                data_for_prev[int(k)] = self._data[k]
+                del self._data[k]
+        self.ans_get_data(self._prev,data_for_prev)
+        return
+
+    #envoie des nouvelles données a n
+    def ans_get_data(self,id_s,data):
+        jsonFrame = {}
+        jsonFrame['type'] = 'ans_get_data'
+        jsonFrame['data'] = data
+        send_message(id_s[0],id_s[1],jsonFrame)
+        return
+
+    #n met a jours ses nouvelles données
+    def ans_get_data_action(self,data):
+        for k in data:
+            self._data[k] = data[k]
+        return
+
+    #indiquer a mbprec que n est desormer son suivant
+    def set_next(self):
+        jsonFrame = {}
+        jsonFrame['type'] = "set_next"
+        jsonFrame['id_n'] = self._id
+        send_message(self._prev[0],self._prev[1],jsonFrame)
+        return
+
+    #mbprec met à jour son suivant
+    def set_next_action(self,id_n):
+        self._next = (id_n[0],id_n[1],id_n[2])
+        return
+
+    def listen(self, msg):
         type_message = msg['type']
         if type_message == "join":
             ip = msg["ip"]
             port = msg["port"]
-            self.on_join(ip, port)
+            self.join_action(ip, port)
         elif type_message == "lookup":
             key = msg["key"]
             id_s = msg["id_s"]
-            self.on_lookup(key, id_s)
+            self.lookup_action(key, id_s)
         elif type_message == "ans_lookup":
             key = msg["key"]
             status = msg["value"]
             mb_prec = msg["mbprec"]
-            mn_next = msg["mbnext"]
-            on_ans_lookup(key,status,mb_prec,mb_next)
-        elif type_message == "ans_join": #reponse pour rejoindre le cercle, met ses paramètre a jours
-            self._key = int(msg['key'])
-            mbprec = msg['mbprec']
-            mbnext = msg['mbnext']
-            self._prev = (str(mbprec[0]), int(mbprec[1]), int(mbprec[2]))
-            self._next = (str(mbnext[0]), int(mbnext[1]), int(mbnext[2]))
-            self._id = (str(self._ip), int(self._port), int(self._key))
-            # self.get_data() #demander a mbnext la partie de la table de routage qui doit desormer lui appartenir et se mettre a jour
-            # self.set_next() #indiquer a mbprec que n est desormer son suivant
+            mb_next = msg["mbnext"]
+            self.ans_lookup_action(key,status,mb_prec,mb_next)
+        elif type_message == "ans_join":
+            key = int(msg['key'])
+            mb_prec = msg['mbprec']
+            mb_next = msg['mbnext']
+            self.ans_join_action(key,mb_prec,mb_next)
+        elif type_message == "get_data":
+            id_s = msg["id_s"]
+            self.get_data_action(id_s)
+        elif type_message == "ans_get_data":
+            data = msg["data"]
+            self.ans_get_data_action(data)
+        elif type_message == "set_next":
+            id_n = msg['id_n']
+            self.set_next_action(id_n)
         else:
-            print("Unknown message type %s\n" % msgtype)
-
-
-    #def on_join
-    #def lookup(key, id_s):
-
-def main():
-    print("TEST")
-    n1 = Node(IP_NODE,PORT_NODE)
-    n1.join()
-
-if __name__ == "__main__":
-	main()
+            print(" {} /!\ bad message type /!\ ".format(type_message))

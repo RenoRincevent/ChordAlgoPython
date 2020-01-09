@@ -6,12 +6,10 @@ import json
 import socket
 import logging
 import signal
+import sys
 from chord import Node
 
 BUFFER_SIZE = 2048
-
-IP_NODE = "127.0.0.1"
-PORT_NODE = 10005
 node = None
 
 def threaded(fn):
@@ -60,19 +58,26 @@ def receive():
         except Exception as e:
             log.error("Node %d - json.loads: %s\n" % (key, e))
             return
-        node.on_message(msg)
+        node.listen(msg)
+        print("Etat du node ID={}, Prev={}, Next={}, Data={}\n######".format(node._id,node._prev,node._next,node._data))
 
-#def signal_handler(sig, frame):
-#    print("Catch Ctrl-C")
-#    sys.exit(0)
+def signal_handler(sig, frame):
+   print("Catch Ctrl-C")
+   sys.exit(0)
 
 
-def main():
-#    signal.signal(signal.SIGINT, signal_handler)
+def main(argv):
+    signal.signal(signal.SIGINT, signal_handler)
+    global node
     print("TEST")
-    node = Node(IP_NODE,PORT_NODE)
-    node.join()
+    node = Node(argv[1],int(argv[2]),argv[3],int(argv[4]))
     receive()
+    if argv[1] == argv[3] and argv[2] == argv[4]: #on cree le master
+        node._id = (argv[1],int(argv[2]),1)
+        node._key = 1
+    else:
+        node.join()
 
 if __name__ == "__main__":
-	main()
+    argv = sys.argv[:]
+    main(argv)
