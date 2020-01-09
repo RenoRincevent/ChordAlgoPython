@@ -7,6 +7,7 @@ import socket
 import logging
 import signal
 import sys
+import time
 from chord import Node
 
 BUFFER_SIZE = 2048
@@ -19,7 +20,7 @@ def threaded(fn):
         return thread
     return wrapper
 
-@threaded
+#@threaded
 def receive():
     PORT_BASE = node.get_port()
     s      = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -36,7 +37,9 @@ def receive():
     s.listen(2)
     while True:
         try:
+            print("just here")
             client, addr = s.accept()
+            print("just here2")
         except socket.error:
             break
         rec = ''
